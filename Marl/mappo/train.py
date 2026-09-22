@@ -537,6 +537,7 @@ def train():
     previous_comm_log_probs = None
     previous_comm_entropies = None
     previous_comm_host_valid = None
+    previous_comm_subnet_valid = None
 
     episode_return = np.zeros(NUM_AGENTS, dtype=np.float32)
     episode_returns_log = []
@@ -648,6 +649,22 @@ def train():
             f"{(NUM_AGENTS, num_host_targets)}."
         )
 
+        # Per-sender SUBNET-target validity in STABLE subnet order, used
+        # to mask unobservable subnet ids BEFORE the decoder samples
+        # (see decoder._masked_subnet_logits and
+        # env.get_subnet_valid_mask). Episode-static (the CC4 subnet set
+        # is fixed), but carried per-row like the host mask so rollout
+        # and PPO replay stay comparable.
+        comm_subnet_valid_array = env.get_all_subnet_valid_masks()
+
+        assert comm_subnet_valid_array.shape == (
+            NUM_AGENTS, num_subnet_targets
+        ), (
+            "env.get_all_subnet_valid_masks() returned "
+            f"{comm_subnet_valid_array.shape}, expected "
+            f"{(NUM_AGENTS, num_subnet_targets)}."
+        )
+
         ####################################################
         # Messages available BEFORE acting
         ####################################################
@@ -743,6 +760,7 @@ def train():
             return_decoded=True,
             host_active_mask=host_active_mask_array,
             host_valid_mask=comm_host_valid_array,
+            subnet_valid_mask=comm_subnet_valid_array,
         )
 
         ####################################################
@@ -835,6 +853,13 @@ def train():
             else None
         )
 
+        # Same PREVIOUS-timestep mirroring for the SUBNET mask.
+        stored_comm_subnet_valid = (
+            previous_comm_subnet_valid
+            if previous_comm_subnet_valid is not None
+            else None
+        )
+
         buffer.store(
             obs=obs_array,
             global_obs=global_obs,
@@ -856,6 +881,7 @@ def train():
             communication_log_probs=stored_comm_log_probs,
             communication_entropies=stored_comm_entropies,
             communication_host_valid=stored_comm_host_valid,
+            communication_subnet_valid=stored_comm_subnet_valid,
 
             host_active_mask=host_active_mask_array,
         )
@@ -873,6 +899,7 @@ def train():
         previous_comm_log_probs = communication_log_probs
         previous_comm_entropies = communication_entropies
         previous_comm_host_valid = comm_host_valid_array
+        previous_comm_subnet_valid = comm_subnet_valid_array
         ####################################################
         # Update evaluator state
         ####################################################
@@ -957,6 +984,7 @@ def train():
             previous_comm_log_probs = None
             previous_comm_entropies = None
             previous_comm_host_valid = None
+            previous_comm_subnet_valid = None
 
             obs_dict, info = env.reset(seed=SEED + episode_count)
             previous_info = info

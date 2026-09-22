@@ -201,13 +201,13 @@ class MessageDecoder(nn.Module):
         (env.STABLE_HOST_LIST, the same mapping as ground truth): True
         = the host exists in this episode inside the sender's own slots.
         Out-of-zone hostnames, routers (no observation slots), and
-        nonexistent hosts are False. Subnet ids need no mask (fixed set
-        of 9, always present).
+        nonexistent hosts are False.
 
         A row with zero valid ids falls back to unmasked (mirroring the
         action-mask Sleep safety net) so sampling can never hit an
         all -inf row; in practice every zone always has >=4 real hosts.
         """
+
         valid = host_valid_mask.to(dtype=torch.bool)
         if valid.dim() == 1:
             valid = valid.unsqueeze(0)
@@ -230,11 +230,54 @@ class MessageDecoder(nn.Module):
         safe_valid = valid | ~row_has_valid
         return host_logits.masked_fill(~safe_valid, -1e10)
 
+    @staticmethod
+    def _masked_subnet_logits(
+        subnet_logits: torch.Tensor,
+        subnet_valid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Mask unobservable SUBNET ids out of the target distribution
+        BEFORE sampling/scoring (never sample-then-discard).
+
+        subnet_valid_mask ([B] or [B, S] bool) uses the STABLE subnet
+        order (env.STABLE_SUBNET_LIST, the same mapping as ground truth
+        subnet_status): True = the subnet is observable by this sender
+        (in its own zone -- see env.get_subnet_valid_mask). A sender has
+        no observation basis for any other subnet, and such a claim
+        grades as wrong, so it is kept out of the distribution entirely.
+
+        A row with zero valid ids falls back to unmasked (same safety
+        net as the host mask) so sampling can never hit an all -inf
+        row; in practice every agent observes >=1 subnet.
+        """
+        valid = subnet_valid_mask.to(dtype=torch.bool)
+        if valid.dim() == 1:
+            valid = valid.unsqueeze(0)
+        if valid.shape[-1] != subnet_logits.shape[-1]:
+            raise ValueError(
+                "subnet_valid_mask last dim "
+                f"{valid.shape[-1]} does not match subnet vocabulary "
+                f"{subnet_logits.shape[-1]} -- mask and head disagree on "
+                "the stable subnet order."
+            )
+        if valid.shape[0] == 1 and subnet_logits.shape[0] > 1:
+            valid = valid.expand(subnet_logits.shape[0], -1)
+        if valid.shape[0] != subnet_logits.shape[0]:
+            raise ValueError(
+                "subnet_valid_mask batch "
+                f"{valid.shape[0]} does not match logits batch "
+                f"{subnet_logits.shape[0]}."
+            )
+        row_has_valid = valid.any(dim=-1, keepdim=True)
+        safe_valid = valid | ~row_has_valid
+        return subnet_logits.masked_fill(~safe_valid, -1e10)
+
     def _sample_target_id(
         self,
         outputs: Dict[str, torch.Tensor],
         target_type_ids: torch.Tensor,
         host_valid_mask: torch.Tensor = None,
+        subnet_valid_mask: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Sample target_id for a whole batch, per-row selecting HOST vs
@@ -250,6 +293,12 @@ class MessageDecoder(nn.Module):
         per-episode-valid ids BEFORE sampling -- see
         _masked_host_logits(). The mask must use the STABLE host
         order; SUBNET/NONE rows are unaffected.
+
+        subnet_valid_mask (optional) restricts the SUBNET head to the
+        sender's observable subnets BEFORE sampling -- see
+        _masked_subnet_logits() and env.get_subnet_valid_mask(). The
+        mask must use the STABLE subnet order; HOST/NONE rows are
+        unaffected.
         """
 
         batch_shape = target_type_ids.shape
@@ -275,7 +324,12 @@ class MessageDecoder(nn.Module):
             entropy = torch.where(is_host, host_dist.entropy(), entropy)
 
         if outputs["subnet_target_logits"] is not None:
-            subnet_dist = Categorical(logits=outputs["subnet_target_logits"])
+            subnet_logits = outputs["subnet_target_logits"]
+            if subnet_valid_mask is not None:
+                subnet_logits = self._masked_subnet_logits(
+                    subnet_logits, subnet_valid_mask
+                )
+            subnet_dist = Categorical(logits=subnet_logits)
             subnet_sample = subnet_dist.sample()
             target_id = torch.where(is_subnet, subnet_sample, target_id)
             log_prob = torch.where(is_subnet, subnet_dist.log_prob(subnet_sample), log_prob)
@@ -289,6 +343,7 @@ class MessageDecoder(nn.Module):
         target_type_ids: torch.Tensor,
         target_id: torch.Tensor,
         host_valid_mask: torch.Tensor = None,
+        subnet_valid_mask: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Recompute target_id's log_prob/entropy for a whole batch of
@@ -313,6 +368,10 @@ class MessageDecoder(nn.Module):
         semantics as sampling (see _masked_host_logits): the stored id
         was sampled under this same episode's mask, so replaying under
         it keeps old/new log-probs comparable for the PPO ratio.
+
+        subnet_valid_mask (optional) applies the IDENTICAL validity
+        semantics as sampling for the SUBNET head (see
+        _masked_subnet_logits).
         """
 
         batch_shape = target_type_ids.shape
@@ -336,7 +395,12 @@ class MessageDecoder(nn.Module):
             entropy = torch.where(is_host, host_dist.entropy(), entropy)
 
         if outputs["subnet_target_logits"] is not None:
-            subnet_dist = Categorical(logits=outputs["subnet_target_logits"])
+            subnet_logits = outputs["subnet_target_logits"]
+            if subnet_valid_mask is not None:
+                subnet_logits = self._masked_subnet_logits(
+                    subnet_logits, subnet_valid_mask
+                )
+            subnet_dist = Categorical(logits=subnet_logits)
             safe_target_id = target_id.clamp(0, subnet_dist.logits.shape[-1] - 1)
             log_prob = torch.where(is_subnet, subnet_dist.log_prob(safe_target_id), log_prob)
             entropy = torch.where(is_subnet, subnet_dist.entropy(), entropy)
@@ -348,7 +412,10 @@ class MessageDecoder(nn.Module):
     # ------------------------------------------------------------------
 
     def sample_message(
-        self, hidden: torch.Tensor, host_valid_mask: torch.Tensor = None
+        self,
+        hidden: torch.Tensor,
+        host_valid_mask: torch.Tensor = None,
+        subnet_valid_mask: torch.Tensor = None,
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """
         Sample a discrete structured message from the current policy.
@@ -360,6 +427,11 @@ class MessageDecoder(nn.Module):
         host_valid_mask (optional [B] or [B, H] bool, STABLE host
         order) masks per-episode-invalid HOST ids BEFORE sampling --
         see _masked_host_logits(). None preserves the legacy unmasked
+        behavior.
+
+        subnet_valid_mask (optional [B] or [B, S] bool, STABLE subnet
+        order) masks unobservable SUBNET ids BEFORE sampling -- see
+        _masked_subnet_logits(). None preserves the legacy unmasked
         behavior.
 
         Returns
@@ -382,7 +454,10 @@ class MessageDecoder(nn.Module):
             entropies[field] = dist.entropy()
 
         target_id, target_log_prob, target_entropy = self._sample_target_id(
-            outputs, field_ids["target_type"], host_valid_mask
+            outputs,
+            field_ids["target_type"],
+            host_valid_mask,
+            subnet_valid_mask,
         )
         field_ids["target_id"] = target_id
         log_probs["target_id"] = target_log_prob
@@ -395,6 +470,7 @@ class MessageDecoder(nn.Module):
         hidden: torch.Tensor,
         field_ids: Dict[str, torch.Tensor],
         host_valid_mask: torch.Tensor = None,
+        subnet_valid_mask: torch.Tensor = None,
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """
         Recompute log_prob/entropy of a STORED sample under current parameters.
@@ -409,6 +485,9 @@ class MessageDecoder(nn.Module):
         episode's mask): the stored id was sampled under it, so replaying
         under it keeps old/new log-probs comparable. None preserves the
         legacy unmasked behavior.
+
+        subnet_valid_mask (optional [B] or [B, S] bool, STABLE subnet
+        order) carries the IDENTICAL semantics for the SUBNET head.
         """
         outputs = self.forward(hidden)
 
@@ -426,6 +505,7 @@ class MessageDecoder(nn.Module):
                 field_ids["target_type"],
                 field_ids["target_id"],
                 host_valid_mask,
+                subnet_valid_mask,
             )
             log_probs["target_id"] = target_log_prob
             entropies["target_id"] = target_entropy

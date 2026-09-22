@@ -370,9 +370,18 @@ class CC4Env:
         Return {hostname: bool} for every host this agent's action space
         can target (routers excluded, they are never action targets).
 
-        True means the host currently has an outstanding malicious-process
-        or suspicious-network-connection event -- i.e. it is currently
-        "flagged" from the agent's own point of view.
+        True means the host has an outstanding malicious-process or
+        suspicious-network-connection event in the CURRENT or PREVIOUS
+        Monitor window (``events.process_creation /
+        old_process_creation`` and ``events.network_connections /
+        old_network_connections``) -- i.e. it is "flagged" from the
+        agent's own point of view, matching exactly what
+        BlueFlatWrapper.observation_change projects into the agent's
+        observation vector (which sums old + new events). This is an
+        "observed recently" signal, not a strict "active right this
+        instant" signal: CybORG's Monitor moves current events into
+        old_* each step, so a flag can persist for one extra step after
+        the underlying event disappears.
         """
 
         state = self.cyborg.environment_controller.state
@@ -405,9 +414,9 @@ class CC4Env:
     def get_zone_alert_flags(self, agent_name):
         """
         Return {subnet_name: bool}: True if ANY host in that subnet is
-        currently flagged (see get_host_alert_flags). Used to gate
-        BlockTrafficZone so an agent cannot cut off a zone with no
-        observed malicious activity.
+        flagged in the "observed recently" sense (see
+        get_host_alert_flags). Used to gate BlockTrafficZone so an
+        agent cannot cut off a zone with no observed malicious activity.
         """
 
         state = self.cyborg.environment_controller.state
@@ -605,7 +614,10 @@ class CC4Env:
           basis for router claims) and read False. Routers run no
           services, so Red cannot establish sessions on them and they
           essentially never appear in target_status.
-        - Subnet targets need no mask (fixed set of 9, always present).
+        - Subnet targets use a SEPARATE mask (see
+          get_subnet_valid_mask): the fixed set of 9 subnets always
+          exists, but a sender only has an observation basis for the
+          subnets in its own zone.
         """
 
         state = self.cyborg.environment_controller.state
@@ -654,6 +666,61 @@ class CC4Env:
             axis=0,
         )
 
+    def get_subnet_valid_mask(self, agent_name):
+        """
+        Return `agent_name`'s SUBNET-target validity mask:
+
+            [len(STABLE_SUBNET_LIST)] bool (currently 9)
+
+        True at stable id `i` iff STABLE_SUBNET_LIST[i] is one of this
+        agent's observable subnets (``self.env.subnets(agent_name)`` --
+        the same sorted per-agent subnet list BlueFlatWrapper.
+        observation_change iterates over and train.py's pad_observation()
+        relies on). Agents 0-3 observe essentially one subnet each, the
+        HQ agent observes three -- any other subnet id has no
+        observation basis for this sender and would grade as wrong
+        against get_ground_truth() (whose subnet_status only covers the
+        sender's own zone), so it is masked out BEFORE sampling (see
+        decoder._masked_subnet_logits).
+
+        Unlike get_host_valid_mask(), this does NOT depend on the
+        per-episode host layout: the CC4 subnet set is fixed, so the
+        mask is episode-static. It is still carried per-row through the
+        rollout buffer (like the host mask) so old/new target_id
+        log-probs stay comparable under PPO replay.
+        """
+
+        mask = np.zeros(len(STABLE_SUBNET_LIST), dtype=bool)
+
+        for subnet in self.env.subnets(agent_name):
+            key = _normalise_subnet_key(subnet)
+            target_id = STABLE_SUBNET_TO_ID.get(key)
+            if target_id is not None:
+                mask[target_id] = True
+
+        return mask
+
+    def get_all_subnet_valid_masks(self):
+        """
+        `get_subnet_valid_mask` for every agent, stacked in the same
+        `sorted(self.possible_agents)` order train.py's `agent_names`
+        already uses everywhere else.
+
+        Returns
+        -------
+        np.ndarray, shape [NUM_AGENTS, len(STABLE_SUBNET_LIST)], bool
+        """
+
+        agent_names = sorted(self.possible_agents)
+
+        return np.stack(
+            [
+                self.get_subnet_valid_mask(name)
+                for name in agent_names
+            ],
+            axis=0,
+        )
+
     ############################################################
     # Ground truth for MessageEvaluator / DynamicTrust
     ############################################################
@@ -671,8 +738,10 @@ class CC4Env:
 
         has_process_event / has_connection_event:
             state.hosts[h].events shows a process_creation /
-            network_connections entry this window (same fields
-            get_host_alert_flags() reads). NOT Red-exclusive --
+            old_process_creation or network_connections /
+            old_network_connections entry in the current or previous
+            Monitor window (same fields get_host_alert_flags() reads,
+            matching the BlueFlatWrapper observation). NOT Red-exclusive --
             GreenLocalWork.py and GreenAccessService.py write into
             these same fields, same as Red's ExploitAction/Portscan --
             so on their own these mean "something happened here", not

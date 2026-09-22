@@ -89,17 +89,20 @@ Usage
         observation=obs, action_mask=mask, ...
     )
 
-`compute_padded_mask` is a pure function of `(env, agent_name)` -- it
-holds no state of its own, so it is automatically correct across the
-`env = CC4Env(...)` re-creation that happens at every episode boundary
-in train.py / evaluate.py. No extra bookkeeping is required by callers.
+`compute_padded_mask` is a function of `(env, agent_name)` plus the
+single config flag `config.USE_AAM` -- it holds no other state of its
+own, so it is automatically correct across the `env = CC4Env(...)`
+re-creation that happens at every episode boundary in train.py /
+evaluate.py. No extra bookkeeping is required by callers. Rollout masks
+are stored in the buffer and replayed verbatim during PPO
+update/re-evaluation, so all stages observe identical USE_AAM behavior.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from .config import ACTION_DIM
+from .config import ACTION_DIM, USE_AAM
 
 
 # ==========================================================
@@ -254,17 +257,60 @@ def pad_mask(mask, action_dim=ACTION_DIM):
     return padded
 
 
+def compute_structural_mask(env, agent_name):
+    """
+    Structural mask only (CybORG episode-static validity + Sleep safety
+    net), WITHOUT the contextual Restore/Remove/BlockTrafficZone gating
+    in compute_adaptive_mask().
+
+    Use for the MAPPO + structural-mask-only ablation: compare against
+    compute_adaptive_mask() under identical seeds to measure how much of
+    the result comes from the hand-written heuristic vs learned policy.
+    """
+    structural = np.asarray(env.action_mask(agent_name), dtype=bool).copy()
+    meta = describe_actions(env, agent_name)
+    sleep_index = None
+    for i, (action_type, _t, _s) in enumerate(meta):
+        if action_type == "Sleep":
+            sleep_index = i
+            break
+    if not structural.any():
+        if sleep_index is not None:
+            structural[sleep_index] = True
+        else:
+            structural[0] = True
+    return structural
+
+
 def compute_padded_mask(env, agent_name, action_dim=ACTION_DIM):
     """
-    Single entry point for train.py / evaluate.py.
+    Single entry point for train.py / evaluate.py / PPO rollout.
+
+    Single source of truth for AAM enable/disable is config.USE_AAM:
+
+      USE_AAM = True  -> compute_adaptive_mask() (structural mask +
+                          contextual AAM gating + Sleep safety net).
+      USE_AAM = False -> compute_structural_mask() only (structural /
+                          environment-validity mask + Sleep safety net,
+                          AAM completely disabled).
 
     Returns a boolean mask of length `action_dim` (the shared-policy
     dimension, 242 by default), ready to pass straight into
     `ppo.select_action(..., action_mask=mask)`.
-    """
 
+    The structural mask is never removed or weakened in either path:
+    AAM only further restricts structurally-valid actions, and the
+    stored rollout masks are replayed verbatim during PPO
+    update/re-evaluation, so rollout, PPO update, training, and
+    evaluation all observe identical USE_AAM behavior.
+    """
+    if USE_AAM:
+        return pad_mask(
+            compute_adaptive_mask(env, agent_name),
+            action_dim=action_dim,
+        )
     return pad_mask(
-        compute_adaptive_mask(env, agent_name),
+        compute_structural_mask(env, agent_name),
         action_dim=action_dim,
     )
 

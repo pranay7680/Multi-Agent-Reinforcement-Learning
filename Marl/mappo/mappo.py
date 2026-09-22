@@ -428,6 +428,7 @@ class MAPPO:
         received_messages=None,
         trust_weights=None,
         host_active_mask=None,
+        communication_valid=None,
     ):
         """
         Select an action using the shared actor.
@@ -470,6 +471,7 @@ class MAPPO:
             received_messages=received_messages,
             trust_weights=trust_weights,
             host_active_mask=prepared_host_mask,
+            communication_valid=communication_valid,
         )
 
         # ------------------------------------------------------
@@ -564,6 +566,8 @@ class MAPPO:
         observation,
         return_decoded=False,
         host_active_mask=None,
+        host_valid_mask=None,
+        subnet_valid_mask=None,
     ):
         """
         Generate one agent's outgoing communication vector.
@@ -572,6 +576,11 @@ class MAPPO:
         validity (see `select_action`). This agent's local_hidden is
         computed from its OWN observation in both select_action() and
         here, so the same per-agent mask semantics apply.
+
+        host_valid_mask / subnet_valid_mask: optional per-sender
+        HOST/SUBNET validity, forwarded to the decoder so single-agent
+        callers get the same BEFORE-sampling masking as
+        get_outgoing_messages().
         """
 
         observation = self._to_tensor(
@@ -598,7 +607,9 @@ class MAPPO:
             message_entropies,
             communication_vector,
         ) = self.communication.generate_message(
-            local_hidden
+            local_hidden,
+            host_valid_mask=host_valid_mask,
+            subnet_valid_mask=subnet_valid_mask,
         )
 
         communication_vector = (
@@ -647,6 +658,7 @@ class MAPPO:
         return_decoded=False,
         host_active_mask=None,
         host_valid_mask=None,
+        subnet_valid_mask=None,
     ):
         """
         Generate communication for every Blue agent.
@@ -669,6 +681,13 @@ class MAPPO:
         sender; per-episode-invalid HOST ids are masked BEFORE
         sampling (see decoder._masked_host_logits). None preserves
         the legacy unmasked behavior.
+
+        subnet_valid_mask: optional [NUM_AGENTS, S] bool (S = STABLE
+        subnet vocabulary, matching num_subnet_targets) -- one row per
+        sender; unobservable SUBNET ids are masked BEFORE sampling
+        (see decoder._masked_subnet_logits and
+        env.get_subnet_valid_mask). None preserves the legacy unmasked
+        behavior.
         """
 
         observations = self._to_tensor(
@@ -711,6 +730,28 @@ class MAPPO:
                     f"{tuple(prepared_valid_mask.shape)}."
                 )
 
+        prepared_subnet_mask = None
+        if subnet_valid_mask is not None:
+            if self.num_subnet_targets is None:
+                raise ValueError(
+                    "subnet_valid_mask supplied but this MAPPO instance "
+                    "was constructed with num_subnet_targets=None."
+                )
+            prepared_subnet_mask = self._to_tensor(
+                subnet_valid_mask,
+                dtype=torch.bool,
+            )
+            if prepared_subnet_mask.dim() != 2 or (
+                prepared_subnet_mask.shape[0] != NUM_AGENTS
+                or prepared_subnet_mask.shape[1] != self.num_subnet_targets
+            ):
+                raise ValueError(
+                    "subnet_valid_mask must have shape "
+                    f"[NUM_AGENTS, num_subnet_targets]=({NUM_AGENTS}, "
+                    f"{self.num_subnet_targets}). Got "
+                    f"{tuple(prepared_subnet_mask.shape)}."
+                )
+
         local_hidden = (
             self.actor.get_local_hidden(
                 observations,
@@ -726,6 +767,7 @@ class MAPPO:
         ) = self.communication.generate_message(
             local_hidden,
             host_valid_mask=prepared_valid_mask,
+            subnet_valid_mask=prepared_subnet_mask,
         )
 
         # ------------------------------------------------------
@@ -1105,6 +1147,7 @@ class MAPPO:
         received_messages=None,
         trust_weights=None,
         host_active_mask=None,
+        communication_valid=None,
     ):
         """
         Standard actor forward.
@@ -1116,6 +1159,12 @@ class MAPPO:
         the actor (unlike select_action()/get_outgoing_message(), the
         caller here is expected to already have batch-aligned data,
         e.g. evaluate_actions()).
+
+        communication_valid: optional [B] bool -- False marks
+        episode-start rows with no previous message. Passed through to
+        the actor so invalid rows return an exact-zero communication
+        context, matching the rollout's received_messages=None path
+        (see SharedActor._apply_received_communication).
         """
 
         logits = self.actor(
@@ -1123,6 +1172,7 @@ class MAPPO:
             received_messages=received_messages,
             trust_weights=trust_weights,
             host_active_mask=host_active_mask,
+            communication_valid=communication_valid,
         )
 
         logits = self._apply_action_mask(
@@ -1447,6 +1497,7 @@ class MAPPO:
         host_active_mask=None,
         communication_host_active_mask=None,
         communication_host_valid=None,
+        communication_subnet_valid=None,
     ):
         """
         Evaluate actions during PPO optimization.
@@ -1496,6 +1547,13 @@ class MAPPO:
         through the CURRENT decoder together with the stored ids so
         old/new target_id log-probs stay comparable (see decoder.
         _masked_host_logits). None replays unmasked (legacy).
+
+        communication_subnet_valid: optional [B, NUM_AGENTS, S] bool
+        (S = STABLE subnet vocabulary) -- each SENDER's SUBNET-target
+        validity for the episode that row was sampled in. Replayed
+        through the CURRENT decoder together with the stored ids so
+        old/new target_id log-probs stay comparable (see decoder.
+        _masked_subnet_logits). None replays unmasked (legacy).
 
         Returns
         -------
@@ -1640,11 +1698,46 @@ class MAPPO:
                     )
                 )
 
+            flat_subnet_valid_mask = None
+
+            if communication_subnet_valid is not None:
+
+                if self.num_subnet_targets is None:
+
+                    raise ValueError(
+                        "communication_subnet_valid supplied but this "
+                        "MAPPO instance was constructed with "
+                        "num_subnet_targets=None."
+                    )
+
+                if communication_subnet_valid.shape != (
+                    batch_size,
+                    NUM_AGENTS,
+                    self.num_subnet_targets,
+                ):
+
+                    raise ValueError(
+                        "communication_subnet_valid must have shape "
+                        f"({batch_size}, {NUM_AGENTS}, "
+                        f"{self.num_subnet_targets}). Got "
+                        f"{tuple(communication_subnet_valid.shape)}."
+                    )
+
+                flat_subnet_valid_mask = (
+                    communication_subnet_valid
+                    .to(device=self.device, dtype=torch.bool)
+                    .reshape(
+                        batch_size * NUM_AGENTS,
+                        self.num_subnet_targets,
+                    )
+                )
+
             message_log_probs, message_entropies = (
                 self.communication.decoder.evaluate_message(
                     flat_sender_hidden,
                     flat_field_ids,
                     flat_host_valid_mask,
+                    flat_subnet_valid_mask,
                 )
             )
 
@@ -1693,6 +1786,7 @@ class MAPPO:
             received_messages=received_messages,
             trust_weights=trust_weights,
             host_active_mask=host_active_mask,
+            communication_valid=communication_valid,
         )
 
         # ======================================================
@@ -2066,6 +2160,14 @@ class MAPPO:
             None,
         )
 
+        # Per-sender SUBNET-target validity for the episode each row was
+        # sampled in ([T, N, S], STABLE subnet order). Absent for legacy
+        # buffers -- replay then trains unmasked, exactly as before.
+        communication_subnet_valid = batch.get(
+            "communication_subnet_valid",
+            None,
+        )
+
         # ------------------------------------------------------
         # Fallback for older buffers
         # ------------------------------------------------------
@@ -2190,6 +2292,41 @@ class MAPPO:
                     f"{expected_valid_shape} (T, NUM_AGENTS, "
                     f"num_host_targets); got "
                     f"{tuple(communication_host_valid.shape)}."
+                )
+
+        # ======================================================
+        # SUBNET-target validity (see communication_subnet_valid fetch
+        # above). Raw buffer shape [T, NUM_AGENTS, S]; S must equal
+        # this instance's subnet vocabulary or mask positions would
+        # silently misalign with the decoder head.
+        # ======================================================
+
+        if communication_subnet_valid is not None:
+
+            if self.num_subnet_targets is None:
+
+                raise ValueError(
+                    "communication_subnet_valid present in buffer but "
+                    "this MAPPO instance was constructed with "
+                    "num_subnet_targets=None."
+                )
+
+            communication_subnet_valid = (
+                communication_subnet_valid.to(
+                    device=self.device,
+                    dtype=torch.bool,
+                )
+            )
+
+            expected_subnet_shape = (T, NUM_AGENTS, self.num_subnet_targets)
+
+            if tuple(communication_subnet_valid.shape) != expected_subnet_shape:
+
+                raise ValueError(
+                    "communication_subnet_valid must have shape "
+                    f"{expected_subnet_shape} (T, NUM_AGENTS, "
+                    f"num_subnet_targets); got "
+                    f"{tuple(communication_subnet_valid.shape)}."
                 )
 
         # ======================================================
@@ -2318,9 +2455,27 @@ class MAPPO:
 
         # ======================================================
         # Value normalization
+        #
+        # old_values in the buffer are DENORMALIZED (select_action()
+        # denormalizes before storage). They must be renormalized with
+        # the SAME statistics that were active at rollout time to
+        # recover the original normalized critic prediction for PPO
+        # value clipping. update(returns) below changes those
+        # statistics, so snapshot the normalized old values FIRST
+        # (using the pre-update stats), then update, then normalize
+        # returns with the new stats. Re-normalizing old values AFTER
+        # the update (the old code) compared current vs "old" values
+        # in different normalized spaces.
         # ======================================================
 
+        old_values_normalized = None
+
         if self.value_norm is not None:
+
+            with torch.no_grad():
+                old_values_normalized = (
+                    self.value_norm.normalize(old_values).detach()
+                )
 
             self.value_norm.update(
                 returns
@@ -2663,6 +2818,36 @@ class MAPPO:
                     )
 
                 # ==================================================
+                # SUBNET-target validity
+                #
+                # Same receiver-expansion as HOST above.
+                # ==================================================
+
+                mb_comm_subnet_valid = None
+
+                if communication_subnet_valid is not None:
+
+                    comm_subnet_mask = (
+                        communication_subnet_valid
+                        .unsqueeze(1)
+                        .expand(
+                            -1,
+                            NUM_AGENTS,
+                            -1,
+                            -1,
+                        )
+                        .reshape(
+                            T * NUM_AGENTS,
+                            NUM_AGENTS,
+                            self.num_subnet_targets,
+                        )
+                    )
+
+                    mb_comm_subnet_valid = (
+                        comm_subnet_mask[idx]
+                    )
+
+                # ==================================================
                 # Forward
                 # ==================================================
 
@@ -2702,6 +2887,10 @@ class MAPPO:
 
                     communication_host_valid=(
                         mb_comm_host_valid
+                    ),
+
+                    communication_subnet_valid=(
+                        mb_comm_subnet_valid
                     ),
                 )
 
@@ -2960,13 +3149,17 @@ class MAPPO:
                     # for storage/logging), so they have to be
                     # renormalized before the clip range is
                     # meaningful -- otherwise PPO_CLIP is comparing
-                    # deltas across two different scales.
+                    # deltas across two different scales. Crucially,
+                    # the renormalization must use the PRE-UPDATE
+                    # statistics active at rollout time (snapshotted
+                    # as old_values_normalized before update() --
+                    # see above), not the post-update statistics:
+                    # re-normalizing mb_old_values here would compare
+                    # current vs "old" values in different spaces.
                     if self.value_norm is not None:
 
                         mb_old_values_for_clip = (
-                            self.value_norm.normalize(
-                                mb_old_values
-                            )
+                            old_values_normalized[idx]
                         )
 
                     else:

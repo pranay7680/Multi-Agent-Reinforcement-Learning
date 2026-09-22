@@ -1224,7 +1224,21 @@ class SharedActor(nn.Module):
         local_hidden: torch.Tensor,
         received_messages: Optional[torch.Tensor],
         trust_weights: Optional[torch.Tensor] = None,
+        communication_valid: Optional[torch.Tensor] = None,
     ):
+        """
+        Attend over received communication.
+
+        communication_valid (optional [B] bool): False marks episode-start
+        rows with no previous message. Invalid rows return an exact zero
+        context -- identical to the ``received_messages is None`` rollout
+        path -- regardless of what (zeroed) message/trust tensors the PPO
+        reconstruction supplies. Without this, zero message tensors still
+        flow through Linear biases + attention + LayerNorm and produce a
+        NONZERO context, contaminating the PPO ratio for episode-start
+        transitions (old_log_prob used no communication, new_log_prob
+        would use a communication branch that technically exists).
+        """
 
         batch_size = local_hidden.shape[0]
         device = local_hidden.device
@@ -1284,6 +1298,22 @@ class SharedActor(nn.Module):
         context = context.squeeze(1)
         context = self.communication_norm(context)
 
+        # Episode-start rows (communication_valid=False) must match the
+        # rollout's exact-zero context (received_messages=None path above).
+        # The reconstructed zero message tensor would otherwise produce a
+        # nonzero context via Linear biases + attention + LayerNorm.
+        if communication_valid is not None:
+            valid = torch.as_tensor(
+                communication_valid, device=device, dtype=torch.bool
+            ).reshape(-1)
+            if valid.shape[0] != batch_size:
+                raise ValueError(
+                    "communication_valid must have shape [B]. Got "
+                    f"{tuple(communication_valid.shape) if hasattr(communication_valid, 'shape') else '?'} "
+                    f"for batch_size={batch_size}."
+                )
+            context = context * valid.to(dtype=context.dtype).view(-1, 1)
+
         return context
 
     # ======================================================
@@ -1297,6 +1327,7 @@ class SharedActor(nn.Module):
         trust_weights: Optional[torch.Tensor] = None,
         return_communication: bool = False,
         host_active_mask: Optional[torch.Tensor] = None,
+        communication_valid: Optional[torch.Tensor] = None,
     ):
 
         squeeze_output = observation.dim() == 1
@@ -1322,10 +1353,14 @@ class SharedActor(nn.Module):
                 outgoing_message,
             ) = self.generate_communication(local_hidden)
 
+        # communication_valid is only meaningful for the batched path;
+        # for the squeezed single-observation path it is reshaped to [1]
+        # inside _apply_received_communication.
         communication_context = self._apply_received_communication(
             local_hidden=local_hidden,
             received_messages=received_messages,
             trust_weights=trust_weights,
+            communication_valid=communication_valid,
         )
 
         policy_representation = torch.cat(

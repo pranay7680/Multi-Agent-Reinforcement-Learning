@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("CyberMarl.Deployment.App")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+fcab77f3a27c65d2002e468868441e4bf29011fd")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3e3a09d04cd9032553367bf3c88a1fc461be28c1")]
 [assembly: System.Reflection.AssemblyProductAttribute("CyberMarl.Deployment.App")]
 [assembly: System.Reflection.AssemblyTitleAttribute("CyberMarl.Deployment.App")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

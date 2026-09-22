@@ -1,7 +1,14 @@
 """
-network_attention.py
+network_attention.py -- DEPRECATED / NOT ACTIVE.
 
-Neural networks for MAPPO with structured communication.
+mappo.py imports MAPPOModel from gnn_attention.py, NOT from this file.
+This module is kept only for reference/history and must not be imported
+by training code. If you are tempted to switch back, note that the
+authoritative communication-attention semantics is trust-as-attention-
+bias ONLY (see gnn_attention.py::SharedActor._apply_received_communication
+and the note below): trust must NOT scale values AND bias logits.
+
+Neural networks for MAPPO with structured communication (legacy).
 
 Architecture
 ------------
@@ -902,10 +909,9 @@ class SharedActor(nn.Module):
                 max=1.0,
             )
 
-            values = (
-                values
-                * trust_safe.unsqueeze(-1)
-            )
+            # NOTE (deprecated file): do NOT re-add values scaling here.
+            # Trust is bias-only (see gnn_attention.py). The old
+            # 'values * trust' line applied trust twice and is removed.
 
             # Actually feed the bias into attention (previously computed
             # but never used): log(trust) changes the mixture weights,

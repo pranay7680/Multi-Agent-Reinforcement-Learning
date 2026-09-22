@@ -1,7 +1,10 @@
 """
 networks.py
 
-Neural networks for MAPPO.
+Neural networks for MAPPO (LEGACY -- DEPRECATED / NOT ACTIVE).
+
+mappo.py imports MAPPOModel from gnn_attention.py, NOT from this file.
+Kept only for reference/history; do not import from training code.
 
 Architecture
 ------------

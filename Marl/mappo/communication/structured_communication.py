@@ -194,6 +194,7 @@ class StructuredCommunication(nn.Module):
             self,
             hidden: torch.Tensor,
             host_valid_mask: torch.Tensor = None,
+            subnet_valid_mask: torch.Tensor = None,
         ) -> tuple[
             Dict[str, torch.Tensor],
             Dict[str, torch.Tensor],
@@ -206,6 +207,11 @@ class StructuredCommunication(nn.Module):
             host_valid_mask (optional [B] or [B, H] bool, STABLE host
             order) masks per-episode-invalid HOST ids BEFORE sampling --
             see MessageDecoder._masked_host_logits(). None preserves the
+            legacy unmasked behavior.
+
+            subnet_valid_mask (optional [B] or [B, S] bool, STABLE subnet
+            order) masks unobservable SUBNET ids BEFORE sampling -- see
+            MessageDecoder._masked_subnet_logits(). None preserves the
             legacy unmasked behavior.
 
             Returns
@@ -228,11 +234,13 @@ class StructuredCommunication(nn.Module):
 
             # ------------------------------------------------------------
             # V2 decoder (mask shapes are validated/expanded inside
-            # MessageDecoder._masked_host_logits)
+            # MessageDecoder._masked_host_logits/_masked_subnet_logits)
             # ------------------------------------------------------------
 
             field_ids, log_probs, entropies = (
-                self.decoder.sample_message(hidden, host_valid_mask)
+                self.decoder.sample_message(
+                    hidden, host_valid_mask, subnet_valid_mask
+                )
             )
 
             # ------------------------------------------------------------
@@ -257,6 +265,7 @@ class StructuredCommunication(nn.Module):
             hidden: torch.Tensor,
             field_ids: Dict[str, torch.Tensor],
             host_valid_mask: torch.Tensor = None,
+            subnet_valid_mask: torch.Tensor = None,
         ) -> tuple[
             Dict[str, torch.Tensor],
             Dict[str, torch.Tensor],
@@ -270,6 +279,9 @@ class StructuredCommunication(nn.Module):
             order) must carry the IDENTICAL validity semantics as
             sampling (same episode's mask) so old/new log-probs stay
             comparable. None preserves the legacy unmasked behavior.
+
+            subnet_valid_mask (optional [B] or [B, S] bool, STABLE subnet
+            order) carries the IDENTICAL semantics for the SUBNET head.
 
             Returns
             -------
@@ -286,6 +298,7 @@ class StructuredCommunication(nn.Module):
                 hidden,
                 field_ids,
                 host_valid_mask,
+                subnet_valid_mask,
             )
 
     # ==================================================================

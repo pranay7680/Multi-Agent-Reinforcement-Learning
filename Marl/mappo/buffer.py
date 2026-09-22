@@ -253,6 +253,26 @@ class MAPPOBuffer:
         self.communication_host_valid = None
 
         # ==========================================================
+        # SUBNET-TARGET VALIDITY (communication_subnet_valid)
+        #
+        # communication_subnet_valid[t, sender] ([S] bool, STABLE subnet
+        # order): which SUBNET ids that sender was allowed to sample at
+        # row t (see env.get_subnet_valid_mask / decoder.
+        # _masked_subnet_logits). Replayed at PPO-update time so
+        # old/new target_id log-probs stay comparable. Lazily
+        # allocated all-True (unmasked-equivalent) on first explicit
+        # store -- mirroring communication_host_valid's safe default --
+        # so rows stored without a mask behave exactly like the unmasked
+        # legacy path. Stays None until first supplied, in which case
+        # get_batches() omits the key and update() trains unmasked.
+        # Unlike the host mask this is episode-static (the CC4 subnet
+        # set is fixed), but it is still carried per-row so rollout and
+        # replay always use the same mask for a given sender.
+        # ==========================================================
+
+        self.communication_subnet_valid = None
+
+        # ==========================================================
         # HOST-LEVEL PADDING (host_active_mask)
         #
         # host_active_mask[t, agent, subnet_slot, host_slot]: True
@@ -317,6 +337,7 @@ class MAPPOBuffer:
         communication_entropies=None,
         host_active_mask=None,
         communication_host_valid=None,
+        communication_subnet_valid=None,
     ):
         """
         Store one timestep of the multi-agent rollout.
@@ -363,6 +384,15 @@ class MAPPOBuffer:
             unavailable: unstamped rows read all-True
             (unmasked-equivalent) and update() trains unmasked if the
             key was never supplied at all.
+
+        communication_subnet_valid:
+
+            [N, S] bool, or None (S = STABLE subnet vocabulary size).
+
+            Row i is agent i's SUBNET-target validity mask that its
+            message at this row was sampled under -- see
+            env.get_subnet_valid_mask(). Same PREVIOUS-timestep
+            mirroring as communication_host_valid.
         """
 
         if self.ptr >= ROLLOUT_STEPS:
@@ -582,6 +612,52 @@ class MAPPOBuffer:
 
             self.communication_host_valid[t] = communication_host_valid
 
+        # ==========================================================
+        # SUBNET-target validity (communication_subnet_valid)
+        # ==========================================================
+
+        if communication_subnet_valid is not None:
+
+            communication_subnet_valid = np.asarray(
+                communication_subnet_valid, dtype=bool
+            )
+
+            if communication_subnet_valid.ndim != 2:
+                raise ValueError(
+                    "Invalid communication_subnet_valid shape. "
+                    "Expected [NUM_AGENTS, S], "
+                    f"got {communication_subnet_valid.shape}"
+                )
+
+            if communication_subnet_valid.shape[0] != NUM_AGENTS:
+                raise ValueError(
+                    "Invalid communication_subnet_valid shape. "
+                    f"Expected {NUM_AGENTS} sender rows, "
+                    f"got {communication_subnet_valid.shape}"
+                )
+
+            if self.communication_subnet_valid is None:
+
+                self.communication_subnet_valid = np.ones(
+                    (ROLLOUT_STEPS, NUM_AGENTS)
+                    + communication_subnet_valid.shape[1:],
+                    dtype=bool,
+                )
+
+            elif (
+                communication_subnet_valid.shape
+                != self.communication_subnet_valid.shape[1:]
+            ):
+
+                raise ValueError(
+                    "Invalid communication_subnet_valid shape. "
+                    "Expected "
+                    f"{self.communication_subnet_valid.shape[1:]}, "
+                    f"got {communication_subnet_valid.shape}"
+                )
+
+            self.communication_subnet_valid[t] = communication_subnet_valid
+
         # ----------------------------------------------------------
         # Advance pointer
         # ----------------------------------------------------------
@@ -740,6 +816,14 @@ class MAPPOBuffer:
 
             batch["communication_host_valid"] = torch.tensor(
                 self.communication_host_valid[:n],
+                dtype=torch.bool,
+                device=DEVICE,
+            )
+
+        if self.communication_subnet_valid is not None:
+
+            batch["communication_subnet_valid"] = torch.tensor(
+                self.communication_subnet_valid[:n],
                 dtype=torch.bool,
                 device=DEVICE,
             )

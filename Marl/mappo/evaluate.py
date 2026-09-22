@@ -569,6 +569,26 @@ def run_episodes(
                 f"{(NUM_AGENTS, ppo.num_host_targets)}."
             )
 
+            # Per-sender SUBNET-target validity in STABLE subnet order
+            # (same mask train.py samples under). Episode-static. None
+            # when the model has no subnet head (legacy
+            # num_subnet_targets=None) -- then sampling/evaluation run
+            # unmasked, exactly as before.
+            if ppo.num_subnet_targets is None:
+                comm_subnet_valid_masks = None
+            else:
+                comm_subnet_valid_masks = (
+                    env.get_all_subnet_valid_masks()
+                )
+
+                assert comm_subnet_valid_masks.shape == (
+                    NUM_AGENTS, ppo.num_subnet_targets
+                ), (
+                    "env.get_all_subnet_valid_masks() returned "
+                    f"{comm_subnet_valid_masks.shape}, expected "
+                    f"{(NUM_AGENTS, ppo.num_subnet_targets)}."
+                )
+
             # ==================================================
             # Centralized critic state
             # ==================================================
@@ -666,6 +686,7 @@ def run_episodes(
                 return_decoded=False,
                 host_active_mask=host_active_masks,
                 host_valid_mask=comm_host_valid_masks,
+                subnet_valid_mask=comm_subnet_valid_masks,
             )
 
             # --------------------------------------------------

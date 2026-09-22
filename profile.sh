@@ -18,3 +18,4 @@ dot -Tsvg "${DOT_OUTPUT_PREFIX}_total.dot" -o "${SVG_OUTPUT_PREFIX}_total.svg"
 dot -Tsvg "${DOT_OUTPUT_PREFIX}_self.dot" -o "${SVG_OUTPUT_PREFIX}_self.svg"
 
 echo "profiling done!"
+echo "0 Idea gng"

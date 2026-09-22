@@ -80,6 +80,18 @@ MAX_GRAD_NORM = 0.5
 VALUE_CLIP = True
 # Was False
 
+# Adaptive Action Mask (contextual gating on top of CybORG's structural
+# mask -- see action_mask.py). Single source of truth for AAM enable/
+# disable. True (default) preserves current behavior: Restore/Remove only
+# on flagged hosts, BlockTrafficZone only from flagged zones. False
+# completely disables AAM and uses only the structural mask (CybORG
+# episode-static validity + Sleep safety net), for the MAPPO +
+# structural-mask-only ablation. The heuristic gate changes the action
+# space from observation -> action into observation -> heuristic ->
+# allowed actions -> policy, so results with it enabled encode domain
+# assumptions.
+USE_AAM = True
+
 # Standard MAPPO practice
 NORMALIZE_ADVANTAGES = True
 
